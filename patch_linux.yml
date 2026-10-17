@@ -85,7 +85,7 @@
       failed_when: false
       when: ansible_os_family == "Suse"
 
-        - name: Reboot if needed
+    - name: Reboot if needed
       ansible.builtin.reboot:
         reboot_timeout: 600
       when: >
