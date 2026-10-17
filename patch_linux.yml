@@ -85,4 +85,10 @@
       failed_when: false
       when: ansible_os_family == "Suse"
 
-    - name: Reboot if needed
+        - name: Reboot if needed
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+      when: >
+        (ansible_os_family == "Debian" and debian_reboot.stat is defined and debian_reboot.stat.exists) or
+        (ansible_os_family == "RedHat" and rhel_reboot.rc is defined and rhel_reboot.rc == 1) or
+        (ansible_os_family == "Suse" and suse_reboot.stdout is defined and suse_reboot.stdout != "")
