@@ -1,1 +1,88 @@
+---
+- name: Work out which Linux servers to patch
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Read the requested IPs and what AWS discovered
+      ansible.builtin.set_fact:
+        requested_linux_ips: "{{ (linux_ips | default('')).split(',') | map('trim') | select | list }}"
+        all_discovered_linux: "{{ groups['tag_OSFamily_ubuntu'] | default([]) + groups['tag_OSFamily_debian'] | default([]) + groups['tag_OSFamily_amazonlinux'] | default([]) + groups['tag_OSFamily_rhel'] | default([]) + groups['tag_OSFamily_suse'] | default([]) }}"
 
+    - name: Stop if no IPs were entered
+      ansible.builtin.assert:
+        that: requested_linux_ips | length > 0
+        fail_msg: "linux_ips is empty - enter at least one server IP"
+
+    - name: Compute final selected Linux hosts
+      ansible.builtin.set_fact:
+        selected_linux_hosts: "{{ all_discovered_linux | intersect(requested_linux_ips) }}"
+
+    - name: Show requested vs discovered vs selected
+      ansible.builtin.debug:
+        msg:
+          - "You asked for:  {{ requested_linux_ips }}"
+          - "AWS discovered: {{ all_discovered_linux }}"
+          - "Will patch:     {{ selected_linux_hosts }}"
+
+    - name: Stop if any requested IP was not found
+      ansible.builtin.assert:
+        that: (requested_linux_ips | difference(all_discovered_linux)) | length == 0
+        fail_msg: "Not found among running, tagged servers: {{ requested_linux_ips | difference(all_discovered_linux) }}"
+        success_msg: "All requested Linux IPs were found"
+
+- name: Patch only the explicitly selected Linux servers
+  hosts: "{{ hostvars['localhost']['selected_linux_hosts'] }}"
+  become: yes
+  gather_facts: yes
+  tasks:
+    - name: Check if swapfile already exists
+      ansible.builtin.stat: {path: /swapfile}
+      register: swapfile_stat
+
+    - name: Set up 1G swap file if missing
+      when: not swapfile_stat.stat.exists
+      block:
+        - ansible.builtin.command: fallocate -l 1G /swapfile
+        - ansible.builtin.file: {path: /swapfile, mode: '0600'}
+        - ansible.builtin.command: mkswap /swapfile
+        - ansible.builtin.command: swapon /swapfile
+        - ansible.builtin.lineinfile:
+            path: /etc/fstab
+            line: '/swapfile none swap sw 0 0'
+            state: present
+
+    - name: Patch Debian/Ubuntu
+      ansible.builtin.apt: {update_cache: yes, upgrade: dist}
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Patch RHEL/Amazon Linux
+      ansible.builtin.yum: {name: "*", state: latest}
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    - name: Patch SUSE
+      community.general.zypper: {name: "*", state: latest, update_cache: yes}
+      when: ansible_os_family == "Suse"
+      ignore_errors: yes
+
+    - name: Check Debian reboot flag
+      ansible.builtin.stat: {path: /var/run/reboot-required}
+      register: debian_reboot
+      when: ansible_os_family == "Debian"
+
+    - name: Check RHEL/Amazon Linux reboot need
+      ansible.builtin.command: needs-restarting -r
+      register: rhel_reboot
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "RedHat"
+
+    - name: Check SUSE reboot need
+      ansible.builtin.command: zypper ps -s
+      register: suse_reboot
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "Suse"
+
+    - name: Reboot if needed
