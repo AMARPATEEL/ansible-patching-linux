@@ -1,0 +1,69 @@
+---
+- name: Work out which servers to report on
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Add Windows targets
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: windows_targets
+        ansible_connection: winrm
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_port: 5985
+        ansible_user: "{{ win_user | default(omit) }}"
+        ansible_password: "{{ win_password | default(omit) }}"
+      loop: "{{ (windows_ips | default('')).split(',') | map('trim') | select | list }}"
+
+    - name: Read the requested Linux IPs and everything AWS discovered
+      ansible.builtin.set_fact:
+        requested_linux: "{{ (linux_ips | default('')).split(',') | map('trim') | select | list }}"
+        report_windows_hosts: "{{ (windows_ips | default('')).split(',') | map('trim') | select | list }}"
+        discovered_linux: "{{ groups.get('tag_OSFamily_ubuntu', []) + groups.get('tag_OSFamily_debian', []) + groups.get('tag_OSFamily_amazonlinux', []) + groups.get('tag_OSFamily_rhel', []) + groups.get('tag_OSFamily_suse', []) }}"
+
+    - name: Pick the Linux servers to report on
+      ansible.builtin.set_fact:
+        report_linux_hosts: "{{ discovered_linux if 'all' in requested_linux else discovered_linux | intersect(requested_linux) }}"
+
+    - name: Build the host pattern for the Linux play
+      ansible.builtin.set_fact:
+        report_linux_pattern: "{{ report_linux_hosts | join(':') if report_linux_hosts | length > 0 else 'no_hosts_selected' }}"
+        all_report_hosts: "{{ report_linux_hosts + report_windows_hosts }}"
+
+- name: Collect facts from the selected Linux servers
+  hosts: "{{ hostvars['localhost']['report_linux_pattern'] }}"
+  gather_facts: no
+  tasks:
+    - name: Gather facts (read-only)
+      ansible.builtin.setup:
+      ignore_unreachable: true
+
+- name: Collect facts from the selected Windows servers
+  hosts: windows_targets
+  gather_facts: no
+  tasks:
+    - name: Gather facts (read-only)
+      ansible.windows.setup:
+      ignore_unreachable: true
+
+- name: Print the report
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Build the report text
+      ansible.builtin.set_fact:
+        report_text: |
+          {{ '%-17s %-24s %-14s %-26s %-9s %s' | format('IP', 'OS', 'VERSION', 'KERNEL', 'UPTIME', 'NAME') }}
+          {{ '-' * 100 }}
+          {% for h in all_report_hosts %}
+          {% set f = hostvars[h].ansible_facts | default({}) %}
+          {% if f.distribution is defined %}
+          {{ '%-17s %-24s %-14s %-26s %-9s %s' | format(h, (f.distribution | replace('Microsoft ', '')), f.distribution_version | default('n/a'), f.kernel | default('n/a'), ((f.uptime_seconds | default(0) | int / 86400) | round(1) | string) + 'd', (hostvars[h].ec2_tags | default({})).Name | default('-')) }}
+          {% else %}
+          {{ '%-17s %s' | format(h, 'NO DATA (unreachable or login failed)') }}
+          {% endif %}
+          {% endfor %}
+
+    - name: Show the report
+      ansible.builtin.debug:
+        msg: "{{ report_text }}"
